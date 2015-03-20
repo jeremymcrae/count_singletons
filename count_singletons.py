@@ -31,7 +31,7 @@ consequence_counts = {"transcript_ablation": 0, "splice_donor_variant": 0,
     "regulatory_region_ablation": 0, "regulatory_region_amplification": 0,
     "regulatory_region_variant": 0, "feature_elongation": 0,
     "feature_truncation": 0, "intergenic_variant": 0,
-    "last_base_of_exon_G": 0}
+    "last_base_of_exon_G": 0, "nc_transcript_variant": 0}
 
 def get_options():
     """ get the command line options
@@ -246,7 +246,7 @@ def reformat_chrX_genotypes(key, genotypes, ddd_parents):
         genotypes[sample_id] = geno[0]
     
     # remove the abberrant heterozygous chrX male genotypes
-    for sample_id in genotypes:
+    for sample_id in exclude_ids:
         del genotypes[sample_id]
     
     return genotypes
@@ -298,10 +298,11 @@ def check_singletons(key, counts, vep, is_last_base, output):
         if allele_count == 0:
             continue
         
+        consequence = consequences[int(number) - 1]
+        
         if is_last_base:
             consequence = "last_base_of_exon_G"
         
-        consequence = consequences[int(number) - 1]
         consequence_counts[consequence] += 1
         
         # we only want to look at singletons
@@ -340,12 +341,13 @@ def parse_vcf(chrom, ddd_parents, vep, last_base, output_path):
         line = line.split("\t", 9)
         variant = line[:9]
         key = get_variant_key(variant)
+        
         format = get_format(variant[8])
         genotypes = get_sample_genotypes(line[9], format, sample_pos)
         genotypes = reformat_chrX_genotypes(key, genotypes, ddd_parents)
         counts = tally_alleles(genotypes, key[3])
-        
-        is_last_base = (key[0], key[1]) in last_base
+        pos = (key[0], key[1])
+        is_last_base = pos in last_base
         check_singletons(key, counts, vep, is_last_base, output)
 
 def main():
