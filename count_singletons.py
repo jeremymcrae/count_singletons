@@ -24,9 +24,10 @@ consequence_counts = {"transcript_ablation": 0, "splice_donor_variant": 0,
     "stop_retained_variant": 0, "synonymous_variant": 0,
     "coding_sequence_variant": 0, "mature_miRNA_variant": 0,
     "5_prime_UTR_variant": 0, "3_prime_UTR_variant": 0,
-    "non_coding_transcript_exon_variant": 0, "non_coding_exon_variant": 0, "intron_variant": 0,
-    "NMD_transcript_variant": 0, "non_coding_transcript_variant": 0,
-    "upstream_gene_variant": 0, "downstream_gene_variant": 0, "TFBS_ablation": 0,
+    "non_coding_transcript_exon_variant": 0, "non_coding_exon_variant": 0,
+    "intron_variant": 0, "NMD_transcript_variant": 0,
+    "non_coding_transcript_variant": 0, "upstream_gene_variant": 0,
+    "downstream_gene_variant": 0, "TFBS_ablation": 0,
     "TFBS_amplification": 0, "TF_binding_site_variant": 0,
     "regulatory_region_ablation": 0, "regulatory_region_amplification": 0,
     "regulatory_region_variant": 0, "feature_elongation": 0,
@@ -40,7 +41,8 @@ def get_options():
     parser = argparse.ArgumentParser(description="Counts singletons within \
         multiple sample VCFs.")
     parser.add_argument("--chrom", required=True, help="chromosome to investigate.")
-    parser.add_argument("--last-base-sites", default="/lustre/scratch113/projects/ddd/users/jm33/last_base_sites.json",
+    parser.add_argument("--last-base-sites",
+        default="/lustre/scratch113/projects/ddd/users/jm33/last_base_sites.json",
         help="path to list of last base sites")
     parser.add_argument("--singletons", default=sys.stdout,
         help="path to send the list of singletons to.")
@@ -90,6 +92,8 @@ def get_ddd_parents():
     return sanger_ids
 
 def get_vep_annotations(chrom):
+    """
+    """
     
     vep_dir = "/lustre/scratch113/projects/ddd/users/ddd/test_msVCF_annotate_vep/vep_annotated_vcfs/results_vcfs"
     vep_path = os.path.join(vep_dir, "{}.txt".format(chrom))
@@ -272,7 +276,31 @@ def tally_alleles(genotypes, alts):
     
     return counts
 
-def check_singletons(key, counts, vep, is_last_base, output):
+def parse_info(info):
+    
+    info = info.strip().split(";")
+    
+    info_dict = {}
+    for item in info:
+        if "=" in item:
+            item = item.split("=")
+            key = item[0]
+            value = item[1]
+        else:
+            key = item
+            value = True
+        
+        info_dict[key] = value
+    
+    required = ["BaseQRankSum", "GQ_MEAN", "MQ", "QD"]
+    for x in required:
+        if x not in info_dict:
+            info_dict[x] = "NA"
+    # [info_dict[x] = "NA" for x in required if x not in info_dict]
+    
+    return info_dict
+
+def check_singletons(variant, key, counts, vep, is_last_base, output):
     """ checks to see if any of the alleles at a site are singletons
     
     Args:
@@ -309,7 +337,11 @@ def check_singletons(key, counts, vep, is_last_base, output):
         if allele_count != 1:
             continue
         
-        line = "{}\t{}\t{}\n".format(key[0], key[1], consequence)
+        info = parse_info(variant[7])
+        
+        line = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\n".format(key[0], key[1], \
+            consequence, variant[5], info["BaseQRankSum"], info["GQ_MEAN"], \
+            info["MQ"], info["QD"])
         
         output.write(line)
 
@@ -321,6 +353,9 @@ def parse_vcf(chrom, ddd_parents, vep, last_base, output_path):
         output = open(output_path, "w")
     except TypeError:
         output = output_path
+    
+    # write a file header
+    output.write("chrom\tpos\tconsequence\tQUAL\tBaseQRankSum\tGQ_MEAN\tMQ\tQD\n")
     
     vcf_path = glob.glob(os.path.join(VCF_DIR, "{}:1-*.vcf.gz".format(chrom)))
     vcf_path = vcf_path[0]
@@ -348,7 +383,7 @@ def parse_vcf(chrom, ddd_parents, vep, last_base, output_path):
         counts = tally_alleles(genotypes, key[3])
         pos = (key[0], key[1])
         is_last_base = pos in last_base
-        check_singletons(key, counts, vep, is_last_base, output)
+        check_singletons(variant, key, counts, vep, is_last_base, output)
 
 def main():
     args = get_options()
