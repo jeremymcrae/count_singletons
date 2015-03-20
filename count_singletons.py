@@ -421,6 +421,49 @@ def parse_info(info):
     
     return info_dict
 
+def check_call_rate(samples):
+    """ check that the variant has enough high quality, high depth genotype calls
+    
+    Erik Minikel said they apply the following filter to exclude variants:
+    AN_ADJ > .95*max(AN_ADJ) # at least 95% of samples had a genotype call with GQ >= 20 and DP >= 10
+    
+    Args:
+        samples: dictionary of sample information for each sample, indexed by
+            sample ID.
+    
+    Returns:
+        true/false for whether there are sufficient high quality genotype calls
+    """
+    
+    count = 0
+    for sample_id in samples:
+        
+        try:
+            if int(samples[sample_id]["DP"]) >= 10 and int(samples[sample_id]["GQ"]) >= 20:
+                count += 1
+        except ValueError:
+            pass
+    
+    return count > 0.95 * len(samples)
+
+def check_min_alt(samples):
+    """ check that the variant has at least one high quality alt allele
+    
+    Args:
+        samples: dictionary of sample information for each sample, indexed by
+            sample ID.
+    
+    Returns:
+        true/false for whether the is at least one sample with an alt allele,
+        where the genotype call is high quality.
+    """
+    
+    for sample_id in samples:
+        if samples[sample_id]["GT"] != "0/0" and int(samples[sample_id]["DP"]) >= 10 and int(samples[sample_id]["GQ"]) >= 20:
+            return True
+    
+    return False
+
 def check_singletons(variant, format, samples, vep, sample_pos, ddd_parents, last_base, min_gq_mean, min_qual, output):
     """ checks to see if any of the alleles at a site are singletons
     
@@ -437,6 +480,10 @@ def check_singletons(variant, format, samples, vep, sample_pos, ddd_parents, las
     # tally the allele counts across all the genotypes
     samples = parse_samples(samples, format, sample_pos)
     samples = reformat_chrX_genotypes(key, samples, ddd_parents)
+    
+    if not check_call_rate(samples) or not check_min_alt(samples):
+        return
+    
     counts = tally_alleles(samples, key[3])
     
     pos = (key[0], key[1])
