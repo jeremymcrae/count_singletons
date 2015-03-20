@@ -14,7 +14,6 @@ import argparse
 IS_PYTHON3 = sys.version[0] == "3"
 
 VCF_DIR = "/lustre/scratch114/projects/ddd/release/20140912/final"
-CHROM = "22"
 
 consequence_counts = {"transcript_ablation": 0, "splice_donor_variant": 0,
     "splice_acceptor_variant": 0, "stop_gained": 0, "frameshift_variant": 0,
@@ -59,6 +58,9 @@ def get_options():
 
 def get_ddd_parents():
     """ get a dictionary of unaffected DDD parents, to their sex
+    
+    Returns:
+        dictionary of sample sanger IDs to their sex eg {"DDD_MAIN0001": "1"}
     """
     
     DIR = "/nfs/ddd0/Data/datafreeze/ddd_data_releases/2014-11-04/"
@@ -96,7 +98,18 @@ def get_ddd_parents():
     return sanger_ids
 
 def get_vep_annotations(chrom):
-    """
+    """ extracts all the VEP consequence strings for variants on a chromosome
+    
+    We load all the VEP consequences for all the variants on a single chrom,
+    known to occur in the DDD population. This way, when we actually parse the
+    genotypes for the variant, we can instantly get the consequence
+    
+    Args:
+        chrom: chromosome string e.g. "12", "X"
+    
+    Returns:
+        dictionary of positions on the chromosome to the consequence strings
+        e.g. {12000: ["missense_variant"], 120001: ["synonymous_variant"]}
     """
     
     vep_dir = "/lustre/scratch113/projects/ddd/users/ddd/test_msVCF_annotate_vep/vep_annotated_vcfs/results_vcfs"
@@ -109,11 +122,13 @@ def get_vep_annotations(chrom):
             line = line.strip().split("\t")
             
             pos = int(line[1])
-            # ref = line[3]
-            # alt = line[4]
             info = line[7]
             
+            # extract the consequence field
             consequence = info.split("CQ=")[1]
+            
+            # tidy the consequence string, and split into a loist if there are
+            # more than one consequence string for different alleles.
             consequence = consequence.split(";", 1)[0].split(",")
             
             vep_consequences[pos] = consequence
@@ -122,6 +137,14 @@ def get_vep_annotations(chrom):
 
 def get_last_base_sites(path):
     """ get the list of last base sites
+    
+    Args:
+        path: path to the json file containing the positions at the last base of
+            an exon where the base is a G (or other bases if required).
+    
+    Returns:
+        set of (chrom, positon) tuples, so we can quickly check whether sites in
+        the VCF are within this set.
     """
     
     with open(path) as handle:
@@ -136,6 +159,9 @@ def get_header(vcf):
     
     Args:
         vcf: handle to vcf file
+    
+    Returns:
+        list of header lines
     """
     
     current_pos = vcf.tell()
@@ -154,6 +180,9 @@ def get_header(vcf):
 
 def exclude_header(vcf):
     """ move the file handle to just beyond the VCF header lines
+    
+    Args:
+        vcf: file handle to VCF
     """
     
     current_pos = vcf.tell()
@@ -166,8 +195,16 @@ def exclude_header(vcf):
 def get_sample_positions(header):
     """ make a dictionary of sample IDs (from the VCF header) vs their position
     
+    The VCF contains many samples, and we only want to investigate a subset of
+    these. We know which samples we wish to use (defined by the family
+    relationships). In order to be able to get this subset in each line of the
+    VCF, we need to figure out which column belongs to which sample.
+    
     Args:
         header: list of VCF header lines, the final line defines the VCF columns
+    
+    Returns:
+        dictionary of sample IDs (from the VCF header) vs their position.
     """
     
     samples = {}
@@ -182,6 +219,9 @@ def get_variant_key(variant):
     
     Args:
         variant: list of data from VCF line for the first 8 columns
+    
+    Returns:
+        unique key for the variant as tuple (chrom, pos, ref allele, alt alleles)
     """
     
     chrom = variant[0]
@@ -191,11 +231,14 @@ def get_variant_key(variant):
     
     return (chrom, pos, ref, alts)
 
-def get_format(format_string):
+def get_format_index(format_string):
     """ figure out the format of the sample columns, map data to position
     
     Args:
-        format_string: text from format column of VCF, colon separated string
+        format_string: text from the format column of VCF, a colon separated string.
+    
+    Return:
+        dictionary of format key to index positions
     """
     
     format = format_string.split(":")
@@ -203,84 +246,132 @@ def get_format(format_string):
     
     return(format)
 
-def get_sample_genotypes(samples, format, sample_pos):
+def parse_samples(samples, format, sample_pos):
     """ get a dictionary of genotypes for specific sample IDs
+    
+    We exclude samples with missing genotypes, since their data shouldn't be
+    used for any subsequent analysis.
+    
+    Args:
+        samples: list of format fields for samples e.g. ["0/1:10:.:.:.",
+            "1/1:10:.:.:.", "./.:10:.:.:."].
+        format: mapping of format keys to their index in the format field
+        sample_pos: dictionary of sample IDs to their position in the samples
+            list. This should only be a subset of the columns from the samples
+            list.
+    
+    Returns:
+        a dictionary of sample format values e.g.
+        {"DDD_MAIN01": {"GT": "0/1", "DP": "10", "GQ": "20"},
+         "DDD_MAIN02": {"GT": "0/0", "DP": "20", "GQ": "30"}
     """
     
     samples = samples.strip().split("\t")
     
-    genotypes = {}
+    parsed = {}
     for sample_id in sample_pos:
-        sample = samples[sample_pos[sample_id]]
-        sample = sample.split(":")
-        genotype = sample[format["GT"]]
+        idx = sample_pos[sample_id]
         
-        # drop missing genotypes, since they cannot contribute to the total
-        # allele count
-        if genotype == "./.":
+        sample_field = samples[idx]
+        sample_field = sample_field.split(":")
+        
+        # put all the format values for the sample into a dictionary
+        data = {}
+        for key in format:
+            index = format[key]
+            
+            # sometimes the sample values format column doesn't have the same
+            # number of fields as defined in the format keys column. This only
+            # occurs in samples that lack genotype calls, so it's not too much
+            # of a problem, as we exclude these samples anyway.
+            try:
+                data[key] = sample_field[index]
+            except IndexError:
+                data[key] = None
+        
+        # drop samples missing genotypes, since they cannot contribute to the
+        # total allele count
+        if data["GT"] == "./.":
             continue
         
-        genotypes[sample_id] = genotype
+        parsed[sample_id] = data
     
-    return genotypes
+    return parsed
 
-def reformat_chrX_genotypes(key, genotypes, ddd_parents):
+def reformat_chrX_genotypes(key, samples, ddd_parents):
     """ swap male genotypes on chrX to a hemizgous type
+    
+    Args:
+        key: tuple of (chrom, pos, ref, alts) for the variant
+        samples: dictionary of sample IDs to sample-based dictionaries
+        ddd_parents: dictionary of sample IDs to sex
+    
+    Returns:
+        samples dictionary, but with hemizygous genotypes modified if required.
     """
     
     # don't alter genotypes not on the X
     if key[0] != "X":
-        return genotypes
+        return samples
     
     # define the pseudoautosomal regions on the X chromosome
     x_par = [(60001, 2699520), (154930290, 155260560), (88456802, 92375509)]
     
     # don't alter genotypes within the pseudoautosomal regions
     if any([key[1] >= x[0] and key[1] < x[1] for x in x_par ]):
-        return genotypes
+        return samples
     
     exclude_ids = []
-    for sample_id in genotypes:
+    for sample_id in samples:
         # don't alter female parents, since they are diploid for chrX
         if ddd_parents[sample_id] != "1":
             continue
         
-        geno = genotypes[sample_id].split("/")
+        alleles = samples[sample_id]["GT"].split("/")
         
-        # drop genotypes for heterozygous males on chrX
-        if geno[0] != geno[1]:
+        # figure out if the genotype is a heterozygous for a male on chrX,
+        # since these are typically errors that we want to exclude.
+        if alleles[0] != alleles[1]:
             exclude_ids.append(sample_id)
         
-        genotypes[sample_id] = geno[0]
+        samples[sample_id]["GT"] = alleles[0]
     
     # remove the abberrant heterozygous chrX male genotypes
     for sample_id in exclude_ids:
-        del genotypes[sample_id]
+        del samples[sample_id]
     
-    return genotypes
+    return samples
 
-def get_singleton_data(samples, genotypes, format, sample_pos):
-    """
+def get_singleton_data(samples):
+    """ get the data for the sample with a singleton
+    
+    Args:
+        samples: dictionary of parsed sample values for the population
+        
+    Returns:
+        dictionary entry for the singleton sample.
     """
     
     # find the sample ID for the sole sample without a ref genotype
-    for sample_id in genotypes:
-        geno = genotypes[sample_id]
+    for sample_id in samples:
+        geno = samples[sample_id]["GT"]
         
         if geno != "0/0" and geno != "0":
             break
     
-    samples = samples.strip().split("\t")
-    sample = samples[sample_pos[sample_id]].split(":")
+    samples[sample_id]["id"] = sample_id
     
-    sample_data = {"id": sample_id}
-    for key in format:
-        sample_data[key] = sample[format[key]]
-    
-    return sample_data
+    return samples[sample_id]
 
-def tally_alleles(genotypes, alts):
+def tally_alleles(samples, alts):
     """ count the alleles used in the genotypes
+    
+    Args:
+        samples: dictionary of parsed sample values for the population.
+    
+    Returns:
+        tallies of how many alleles were seen for each allele.
+        e.g. ["0": 10000, "1": 100, "2": 10]
     """
     
     # make sure we have entries for all the alt alleles, even if the count
@@ -290,21 +381,33 @@ def tally_alleles(genotypes, alts):
     allele_numbers = ["{}".format(x + 1) for x in range(len(alts))]
     allele_numbers.append("0")
     
-    # tally each allele found in the genotypes
+    # tally each allele found in the genotypes, by default give every allele a
+    # zero count (note that some alleles might not occur in the unaffected
+    # DDD parents).
     counts = dict(zip(allele_numbers, [0]* len(allele_numbers)))
-    for genotype in genotypes.values():
-        genotype = genotype.split("/")
+    for sample_id in samples:
+        alleles = samples[sample_id]["GT"].split("/")
         
-        for allele in genotype:
+        for allele in alleles:
             counts[allele] += 1
     
     return counts
 
 def parse_info(info):
+    """ parse the info string from the VCF INFO field.
+    
+    Args:
+        info: VCF INFO field for a single variant.
+    
+    Returns:
+        dictionary of key, values from the info field. Info keys that are flags
+        are given True values.
+    """
     
     info = info.strip().split(";")
     
-    info_dict = {}
+    # ensure every variant has the required columns
+    info_dict = {"BaseQRankSum": "NA", "GQ_MEAN": "NA", "MQ": "NA", "QD": "NA"}
     for item in info:
         if "=" in item:
             item = item.split("=")
@@ -315,12 +418,6 @@ def parse_info(info):
             value = True
         
         info_dict[key] = value
-    
-    # ensure every variant has the required columns
-    required = ["BaseQRankSum", "GQ_MEAN", "MQ", "QD"]
-    for x in required:
-        if x not in info_dict:
-            info_dict[x] = "NA"
     
     return info_dict
 
@@ -338,9 +435,9 @@ def check_singletons(variant, format, samples, vep, sample_pos, ddd_parents, las
     key = get_variant_key(variant)
     
     # tally the allele counts across all the genotypes
-    genotypes = get_sample_genotypes(samples, format, sample_pos)
-    genotypes = reformat_chrX_genotypes(key, genotypes, ddd_parents)
-    counts = tally_alleles(genotypes, key[3])
+    samples = parse_samples(samples, format, sample_pos)
+    samples = reformat_chrX_genotypes(key, samples, ddd_parents)
+    counts = tally_alleles(samples, key[3])
     
     pos = (key[0], key[1])
     is_last_base = pos in last_base
@@ -379,7 +476,7 @@ def check_singletons(variant, format, samples, vep, sample_pos, ddd_parents, las
         if allele_count != 1:
             continue
         
-        sample = get_singleton_data(samples, genotypes, format, sample_pos)
+        sample = get_singleton_data(samples)
         
         line = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}\t{11}\n".format(key[0], key[1], \
             consequence, variant[5], info["BaseQRankSum"], info["GQ_MEAN"], \
@@ -418,7 +515,7 @@ def parse_vcf(chrom, ddd_parents, vep, last_base, min_gq_mean, min_qual, output_
     for line in vcf:
         line = line.split("\t", 9)
         variant = line[:9]
-        format = get_format(variant[8])
+        format = get_format_index(variant[8])
         
         check_singletons(variant, format, line[9], vep, sample_pos, ddd_parents, last_base, min_gq_mean, min_qual, output)
 
