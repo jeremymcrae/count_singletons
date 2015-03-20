@@ -48,6 +48,10 @@ def get_options():
         help="path to send the list of singletons to.")
     parser.add_argument("--totals", default=sys.stdout,
         help="path to send the totals for each consequence class.")
+    parser.add_argument("--gq-mean", type=float, default=0.0, help="minimum GQ_MEAN of \
+        variants to include")
+    parser.add_argument("--qual", type=float, default=0.0, help="minimum QUAL of \
+        variants to include")
     
     args = parser.parse_args()
     
@@ -255,6 +259,26 @@ def reformat_chrX_genotypes(key, genotypes, ddd_parents):
     
     return genotypes
 
+def get_singleton_data(samples, genotypes, format, sample_pos):
+    """
+    """
+    
+    # find the sample ID for the sole sample without a ref genotype
+    for sample_id in genotypes:
+        geno = genotypes[sample_id]
+        
+        if geno != "0/0" and geno != "0":
+            break
+    
+    samples = samples.strip().split("\t")
+    sample = samples[sample_pos[sample_id]].split(":")
+    
+    sample_data = {"id": sample_id}
+    for key in format:
+        sample_data[key] = sample[format[key]]
+    
+    return sample_data
+
 def tally_alleles(genotypes, alts):
     """ count the alleles used in the genotypes
     """
@@ -292,28 +316,39 @@ def parse_info(info):
         
         info_dict[key] = value
     
+    # ensure every variant has the required columns
     required = ["BaseQRankSum", "GQ_MEAN", "MQ", "QD"]
     for x in required:
         if x not in info_dict:
             info_dict[x] = "NA"
-    # [info_dict[x] = "NA" for x in required if x not in info_dict]
     
     return info_dict
 
-def check_singletons(variant, key, counts, vep, is_last_base, output):
+def check_singletons(variant, format, samples, vep, sample_pos, ddd_parents, last_base, min_gq_mean, min_qual, output):
     """ checks to see if any of the alleles at a site are singletons
     
     Args:
         key: tuple of (chrom, pos, ref, alt)
-        counts: dictionary of number of alleles seen in the unaffecetd DDD parents
+        format: dictionary of format keys, matched to their position in the sample strings
+        samples: samples string from VCF line
         vep: dictionary of consequence strings for each allele, indexed by chrom position
-        is_last_base: True/False for whether the variant is at the last base of an
-            exon with a G reference.
+        output: File handle for output
     """
+    
+    key = get_variant_key(variant)
+    
+    # tally the allele counts across all the genotypes
+    genotypes = get_sample_genotypes(samples, format, sample_pos)
+    genotypes = reformat_chrX_genotypes(key, genotypes, ddd_parents)
+    counts = tally_alleles(genotypes, key[3])
+    
+    pos = (key[0], key[1])
+    is_last_base = pos in last_base
     
     consequences = vep[key[1]]
     
     # remove the reference allele, since we don't have a consequence for that
+    total = sum(counts.values())
     del counts["0"]
     
     allele_numbers = sorted(counts)
@@ -331,21 +366,29 @@ def check_singletons(variant, key, counts, vep, is_last_base, output):
         if is_last_base:
             consequence = "last_base_of_exon_G"
         
+        info = parse_info(variant[7])
+        if float(variant[5]) < min_qual:
+            continue
+        
+        if "GQ_MEAN" in info and float(info["GQ_MEAN"]) < min_gq_mean:
+            continue
+        
         consequence_counts[consequence] += 1
         
         # we only want to look at singletons
         if allele_count != 1:
             continue
         
-        info = parse_info(variant[7])
+        sample = get_singleton_data(samples, genotypes, format, sample_pos)
         
-        line = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\n".format(key[0], key[1], \
+        line = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}\t{11}\n".format(key[0], key[1], \
             consequence, variant[5], info["BaseQRankSum"], info["GQ_MEAN"], \
-            info["MQ"], info["QD"])
+            info["MQ"], info["QD"], total, sample["DP"], sample["GQ"], sample["id"])
         
         output.write(line)
+        # sys.exit()
 
-def parse_vcf(chrom, ddd_parents, vep, last_base, output_path):
+def parse_vcf(chrom, ddd_parents, vep, last_base, min_gq_mean, min_qual, output_path):
     """ run through a VCF, counting the alleles, looking for singletons
     """
     
@@ -355,7 +398,7 @@ def parse_vcf(chrom, ddd_parents, vep, last_base, output_path):
         output = output_path
     
     # write a file header
-    output.write("chrom\tpos\tconsequence\tQUAL\tBaseQRankSum\tGQ_MEAN\tMQ\tQD\n")
+    output.write("chrom\tpos\tconsequence\tQUAL\tBaseQRankSum\tGQ_MEAN\tMQ\tQD\tnumber_of_alleles\tsample_DP\tsample_GQ\tsample_id\n")
     
     vcf_path = glob.glob(os.path.join(VCF_DIR, "{}:1-*.vcf.gz".format(chrom)))
     vcf_path = vcf_path[0]
@@ -375,15 +418,9 @@ def parse_vcf(chrom, ddd_parents, vep, last_base, output_path):
     for line in vcf:
         line = line.split("\t", 9)
         variant = line[:9]
-        key = get_variant_key(variant)
-        
         format = get_format(variant[8])
-        genotypes = get_sample_genotypes(line[9], format, sample_pos)
-        genotypes = reformat_chrX_genotypes(key, genotypes, ddd_parents)
-        counts = tally_alleles(genotypes, key[3])
-        pos = (key[0], key[1])
-        is_last_base = pos in last_base
-        check_singletons(variant, key, counts, vep, is_last_base, output)
+        
+        check_singletons(variant, format, line[9], vep, sample_pos, ddd_parents, last_base, min_gq_mean, min_qual, output)
 
 def main():
     args = get_options()
@@ -392,7 +429,7 @@ def main():
     last_base = get_last_base_sites(args.last_base_sites)
     
     try:
-        parse_vcf(args.chrom, ddd_parents, vep, last_base, args.singletons)
+        parse_vcf(args.chrom, ddd_parents, vep, last_base, args.gq_mean, args.qual, args.singletons,)
     finally:
         # and finally show how many times each consequence was seen in the DDD
         # unaffected parents, so we can determine the proportion of that each
