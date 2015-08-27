@@ -152,6 +152,11 @@ def has_following_CDS(coordinates, pos):
     
     strand = coordinates["strand"]
     
+    # if the transcript lacks a CDS, we can't idenify conserved last base of
+    # exon sites in a CDS
+    if "CDS" not in coordinates:
+        return False
+    
     # find the exons "after" the selected position.
     if strand == "+":
         exons_after = [ x for x in coordinates["exon"] if x[0] > pos ]
