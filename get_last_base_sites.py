@@ -18,6 +18,7 @@ import sys
 import gzip
 import json
 import argparse
+import mimetypes
 
 from pyfaidx import Fasta
 
@@ -225,16 +226,21 @@ def main():
     """
     """
     
-    options = get_options()
+    args = get_options()
     
-    gencode = gzip.open(options.gencode)
-    if IS_PYTHON3:
-        gencode = gzip.open(options.gencode, "rt")
+    (g_type, g_encoding) = mimetypes.guess_type(args.gencode)
+    if g_encoding == "gzip:"
+        gencode = gzip.open(args.gencode)
+        if IS_PYTHON3:
+            gencode = gzip.open(args.gencode, "rt")
+    else:
+        gencode = open(args.gencode, "r")
+    
     remove_header(gencode)
     
     genome = Fasta(options.fasta)
     
-    get_last_base_sites(genome, gencode, options.out, options.base)
+    get_last_base_sites(genome, gencode, args.out, args.base)
 
 
 if __name__ == "__main__":
